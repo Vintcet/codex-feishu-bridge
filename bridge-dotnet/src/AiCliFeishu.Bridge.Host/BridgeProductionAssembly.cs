@@ -197,6 +197,10 @@ internal interface IBridgeActiveInputStateOwner
 {
     BridgeBusinessStateSnapshot Snapshot { get; }
 
+    ValueTask<InputRequestState?> ExpireInputAsync(
+        string requestId,
+        CancellationToken cancellationToken = default);
+
     ValueTask<BridgeInputAnswerProgress?> TryRecordInputAnswerAsync(
         string requestId,
         string sessionId,

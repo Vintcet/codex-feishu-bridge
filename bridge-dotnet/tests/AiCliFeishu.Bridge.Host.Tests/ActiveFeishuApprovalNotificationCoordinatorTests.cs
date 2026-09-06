@@ -144,6 +144,114 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
     }
 
     [TestMethod]
+    public async Task StartupExpiresHistoricalInputWithoutCreatingAGroupOrSendingACard()
+    {
+        var store = new RecordingStoreOwner(StoreSnapshot());
+        var first = new ActivePersistentBusinessStateOwner(
+            Options(), store, new FixedTimeProvider(Origin));
+        await first.StartAsync(CancellationToken.None);
+        await first.HandleAsync(InputEvent());
+        var lastSeenAt = first.Snapshot.Sessions.Sessions["session-1"].LastSeenAt;
+
+        var restarted = new ActivePersistentBusinessStateOwner(
+            Options(), store, new FixedTimeProvider(Origin.AddDays(23)));
+        await restarted.StartAsync(CancellationToken.None);
+        var groups = new RecordingSessionGroupCoordinator(["chat-owner"]);
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        using var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            restarted,
+            store,
+            gateway,
+            renderer,
+            new FeishuInteractionCoordinator(gateway, renderer, new InMemoryFeishuCardPatchLedger()),
+            groups,
+            restarted);
+
+        await coordinator.StartAsync(CancellationToken.None);
+        await coordinator.NotifyPendingInputAsync("input-1", "session-1");
+        await coordinator.StopAsync(CancellationToken.None);
+
+        Assert.AreEqual(InputRequestStatuses.TimedOut, restarted.Snapshot.Inputs.Requests["input-1"].Status);
+        Assert.AreEqual(0, BridgeStoreCoreProjection.ProjectInputs(store.Current).Requests.Count);
+        Assert.AreEqual(lastSeenAt, restarted.Snapshot.Sessions.Sessions["session-1"].LastSeenAt);
+        Assert.AreEqual(SessionStatuses.Waiting, restarted.Snapshot.Sessions.Sessions["session-1"].Status);
+        Assert.AreEqual(0, groups.NotificationRequests);
+        Assert.AreEqual(0, gateway.Sends.Count);
+
+        var nextRestart = new ActivePersistentBusinessStateOwner(
+            Options(), store, new FixedTimeProvider(Origin.AddDays(24)));
+        await nextRestart.StartAsync(CancellationToken.None);
+        Assert.AreEqual(0, nextRestart.Snapshot.Inputs.Requests.Count);
+    }
+
+    [TestMethod]
+    public async Task RetryExpiresDeliveredInputAndDisablesItsCardWithoutRecreatingTheGroup()
+    {
+        var store = new RecordingStoreOwner(StoreSnapshot());
+        var clock = new FixedTimeProvider(Origin.AddMinutes(3));
+        var state = new ActivePersistentBusinessStateOwner(Options(), store, clock);
+        await state.StartAsync(CancellationToken.None);
+        await state.HandleAsync(InputEvent());
+        var groups = new RecordingSessionGroupCoordinator(["chat-owner"]);
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        using var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            state,
+            store,
+            gateway,
+            renderer,
+            new FeishuInteractionCoordinator(gateway, renderer, new InMemoryFeishuCardPatchLedger()),
+            groups,
+            state);
+        await coordinator.NotifyPendingInputAsync("input-1", "session-1");
+
+        clock.UtcNow = Origin.AddMinutes(22);
+        Assert.IsNull(await state.TryClaimInputAsync("input-1", "session-1"));
+        Assert.IsNull(await state.TryRecordInputAnswerAsync("input-1", "session-1", "q1", ["test"]));
+        await coordinator.NotifyPendingInputAsync("input-1", "session-1");
+        await coordinator.NotifyPendingInputAsync("input-1", "session-1");
+
+        Assert.AreEqual(InputRequestStatuses.TimedOut, state.Snapshot.Inputs.Requests["input-1"].Status);
+        Assert.AreEqual(0, BridgeStoreCoreProjection.ProjectInputs(store.Current).Requests.Count);
+        Assert.AreEqual(1, groups.NotificationRequests);
+        Assert.AreEqual(1, gateway.Sends.Count);
+        Assert.AreEqual(1, gateway.Patches.Count);
+        Assert.IsFalse(gateway.Patches[0].Card.Content.ToJsonString().Contains(
+            FeishuCardActions.InputAnswer, StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task InputExpiringWhileFindingItsChatIsNotSent()
+    {
+        var store = new RecordingStoreOwner(StoreSnapshot());
+        var clock = new FixedTimeProvider(Origin.AddMinutes(3));
+        var state = new ActivePersistentBusinessStateOwner(Options(), store, clock);
+        await state.StartAsync(CancellationToken.None);
+        await state.HandleAsync(InputEvent());
+        var groups = new RecordingSessionGroupCoordinator(["chat-owner"])
+        {
+            OnNotification = () => clock.UtcNow = Origin.AddMinutes(22),
+        };
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        using var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            state,
+            store,
+            gateway,
+            renderer,
+            new FeishuInteractionCoordinator(gateway, renderer, new InMemoryFeishuCardPatchLedger()),
+            groups,
+            state);
+
+        await coordinator.NotifyPendingInputAsync("input-1", "session-1");
+
+        Assert.AreEqual(InputRequestStatuses.TimedOut, state.Snapshot.Inputs.Requests["input-1"].Status);
+        Assert.AreEqual(0, gateway.Sends.Count);
+        Assert.AreEqual(0, BridgeStoreCoreProjection.ProjectInputs(store.Current).Requests.Count);
+    }
+
+    [TestMethod]
     public async Task MissingInputRecipientImmediatelyReturnsManagedHookToLocalAnswering()
     {
         var store = new RecordingStoreOwner(StoreSnapshot());
@@ -564,6 +672,9 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
     private sealed class RecordingSessionGroupCoordinator(IReadOnlyList<string> chats) :
         IBridgeActiveSessionGroupCoordinator
     {
+        public int NotificationRequests { get; private set; }
+        public Action? OnNotification { get; init; }
+
         public ValueTask<SessionStoreRecord?> EnsureAsync(
             string sessionId,
             CancellationToken cancellationToken = default) =>
@@ -581,8 +692,12 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
 
         public ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
             string sessionId,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(chats);
+            CancellationToken cancellationToken = default)
+        {
+            NotificationRequests++;
+            OnNotification?.Invoke();
+            return ValueTask.FromResult(chats);
+        }
 
         public void ScheduleEnsure(string sessionId)
         {
@@ -728,6 +843,7 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
 
     private sealed class FixedTimeProvider(DateTimeOffset value) : TimeProvider
     {
-        public override DateTimeOffset GetUtcNow() => value;
+        public DateTimeOffset UtcNow { get; set; } = value;
+        public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 }

@@ -1432,6 +1432,11 @@ public sealed class BridgeProductionAssemblyTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<BridgeApprovalClaim?>(null);
 
+        public ValueTask<InputRequestState?> ExpireInputAsync(
+            string requestId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<InputRequestState?>(null);
+
         public ValueTask<BridgeInputAnswerProgress?> TryRecordInputAnswerAsync(
             string requestId,
             string sessionId,

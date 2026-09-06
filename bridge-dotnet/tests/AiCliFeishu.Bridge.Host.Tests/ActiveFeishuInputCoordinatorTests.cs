@@ -630,6 +630,11 @@ public sealed class ActiveFeishuInputCoordinatorTests
             }
         }
 
+        public ValueTask<InputRequestState?> ExpireInputAsync(
+            string requestId,
+            CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException("Unexpected input expiration.");
+
         public ValueTask<BridgeInputAnswerProgress?> TryRecordInputAnswerAsync(
             string requestId,
             string sessionId,

@@ -1456,6 +1456,10 @@ public sealed class ActiveFeishuIntentHandlerTests
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } = snapshot;
 
+        public ValueTask<InputRequestState?> ExpireInputAsync(
+            string requestId,
+            CancellationToken cancellationToken = default) => Unexpected<InputRequestState?>();
+
         public ValueTask<BridgeInputAnswerProgress?> TryRecordInputAnswerAsync(
             string requestId,
             string sessionId,

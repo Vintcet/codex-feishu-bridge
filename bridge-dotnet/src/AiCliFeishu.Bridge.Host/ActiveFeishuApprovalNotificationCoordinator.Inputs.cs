@@ -115,7 +115,8 @@ internal sealed partial class ActiveFeishuApprovalNotificationCoordinator
         string sessionId,
         CancellationToken cancellationToken)
     {
-        var current = inputStateOwner!.Snapshot;
+        await inputStateOwner!.ExpireInputAsync(requestId, cancellationToken);
+        var current = inputStateOwner.Snapshot;
         if (!TryPendingInput(
                 current,
                 requestId,
@@ -123,6 +124,7 @@ internal sealed partial class ActiveFeishuApprovalNotificationCoordinator
                 out var input,
                 out var session))
         {
+            await SynchronizeInputCoreAsync(requestId, sessionId, cancellationToken);
             return;
         }
         var store = await storeOwner.ReadAsync(cancellationToken);
@@ -158,6 +160,17 @@ internal sealed partial class ActiveFeishuApprovalNotificationCoordinator
                 }
                 try
                 {
+                    await inputStateOwner.ExpireInputAsync(requestId, cancellationToken);
+                    if (!TryPendingInput(
+                            inputStateOwner.Snapshot,
+                            requestId,
+                            sessionId,
+                            out _,
+                            out _))
+                    {
+                        await SynchronizeInputCoreAsync(requestId, sessionId, cancellationToken);
+                        return;
+                    }
                     var card = renderer.PendingInput(
                         sessionView,
                         requestId,

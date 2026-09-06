@@ -9,6 +9,64 @@ namespace AiCliFeishu.Bridge.Host;
 
 internal sealed partial class ActivePersistentBusinessStateOwner
 {
+    public async ValueTask<InputRequestState?> ExpireInputAsync(
+        string requestId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            var next = ExpireInput(current, requestId, clock.GetUtcNow());
+            if (ReferenceEquals(next, current))
+            {
+                return null;
+            }
+            await PersistAsync(next, cancellationToken);
+            Volatile.Write(ref snapshot, next);
+            inputClaims.Remove(requestId);
+            return next.Inputs.Requests[requestId];
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    private static BridgeBusinessStateSnapshot ExpireInput(
+        BridgeBusinessStateSnapshot current,
+        string requestId,
+        DateTimeOffset observedAt)
+    {
+        var expired = InputStateMachine.Expire(current.Inputs, requestId, observedAt);
+        if (!expired.Value)
+        {
+            return current;
+        }
+        var input = expired.State.Requests[requestId];
+        var sessions = current.Sessions;
+        if (sessions.Sessions.TryGetValue(input.SessionId, out var session) &&
+            session.Status == SessionStatuses.PendingInput &&
+            !expired.State.Requests.Values.Any(other =>
+                other.SessionId == session.SessionId &&
+                other.Status == InputRequestStatuses.Pending))
+        {
+            // Expiring a request is housekeeping, not new session activity.
+            sessions = SessionStateMachine.Transition(
+                sessions,
+                session.SessionId,
+                SessionStatuses.Waiting,
+                session.LastSeenAt);
+        }
+        return current with
+        {
+            Revision = current.Revision + 1,
+            Sessions = sessions,
+            Inputs = expired.State,
+        };
+    }
+
     public async ValueTask<BridgeInputAnswerProgress?> TryRecordInputAnswerAsync(
         string requestId,
         string sessionId,
@@ -308,7 +366,7 @@ internal sealed partial class ActivePersistentBusinessStateOwner
         return false;
     }
 
-    private static bool TryPendingInput(
+    private bool TryPendingInput(
         BridgeBusinessStateSnapshot current,
         string requestId,
         string sessionId,
@@ -317,8 +375,10 @@ internal sealed partial class ActivePersistentBusinessStateOwner
     {
         if (current.Inputs.Requests.TryGetValue(requestId, out input!) &&
             input.Status == InputRequestStatuses.Pending &&
+            input.ExpiresAt > clock.GetUtcNow() &&
             string.Equals(input.SessionId, sessionId, StringComparison.Ordinal) &&
-            current.Sessions.Sessions.TryGetValue(sessionId, out session!))
+            current.Sessions.Sessions.TryGetValue(sessionId, out session!) &&
+            session.Status != SessionStatuses.Ended)
         {
             return true;
         }

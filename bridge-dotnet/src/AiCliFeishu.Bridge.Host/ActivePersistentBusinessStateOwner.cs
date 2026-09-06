@@ -83,9 +83,14 @@ internal sealed partial class ActivePersistentBusinessStateOwner(
                 retainedApprovals,
                 inputs);
 
+            foreach (var input in inputs.Requests.Values)
+            {
+                initialized = ExpireInput(initialized, input.RequestId, observedAt);
+            }
             var sessionsChanged = !ReferenceEquals(sessions, core.Sessions);
             var approvalsChanged = !ReferenceEquals(retainedApprovals, recovered.State);
-            if (recovered.Value > 0 || sessionsChanged || approvalsChanged)
+            var inputsChanged = !ReferenceEquals(initialized.Inputs, inputs);
+            if (recovered.Value > 0 || sessionsChanged || approvalsChanged || inputsChanged)
             {
                 await PersistAsync(initialized, cancellationToken);
             }

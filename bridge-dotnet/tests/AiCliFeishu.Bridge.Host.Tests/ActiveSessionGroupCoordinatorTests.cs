@@ -374,6 +374,59 @@ public sealed class ActiveSessionGroupCoordinatorTests
     }
 
     [TestMethod]
+    public async Task NotificationDoesNotRecreateAnInactiveGroupAfterCleanup()
+    {
+        var store = new RecordingStoreOwner(Snapshot(
+            ownerOpenId: "owner",
+            Session("session-old", Origin.AddDays(-23), extensions: new()
+            {
+                ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-old"),
+                ["feishuChatName"] = JsonSerializer.SerializeToElement("Codex|project"),
+                ["feishuChatCreatedAt"] = JsonSerializer.SerializeToElement(Origin.AddDays(-8).ToString("O")),
+            })));
+        var gateway = new RecordingGateway();
+        var (state, coordinator) = Owners(store, gateway);
+        using (coordinator)
+        {
+            await state.StartAsync(CancellationToken.None);
+            await coordinator.StartAsync(CancellationToken.None);
+            CollectionAssert.AreEqual(new[] { "chat-old" }, gateway.Deleted.ToArray());
+
+            var chats = await coordinator.NotificationChatsAsync("session-old");
+            await coordinator.EnsureAsync("session-old");
+
+            Assert.AreEqual(0, gateway.CreateAttempts);
+            Assert.AreEqual(0, gateway.Welcome.Count);
+            Assert.AreEqual(0, chats.Count);
+            Assert.IsNull(ExtensionString(store.Current, "session-old", "feishuChatId"));
+
+            var retry = await coordinator.RetryAsync("session-old");
+            Assert.IsTrue(retry.Succeeded);
+            Assert.AreEqual(1, gateway.CreateAttempts);
+            await coordinator.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [TestMethod]
+    public async Task NotificationDoesNotCreateAGroupForAnEndedSession()
+    {
+        var store = new RecordingStoreOwner(Snapshot(
+            ownerOpenId: "owner",
+            Session("session-ended", Origin, status: SessionStatuses.Ended)));
+        var gateway = new RecordingGateway();
+        var (state, coordinator) = Owners(store, gateway);
+        using (coordinator)
+        {
+            await state.StartAsync(CancellationToken.None);
+            await coordinator.StartAsync(CancellationToken.None);
+            await coordinator.NotificationChatsAsync("session-ended");
+            Assert.AreEqual(0, gateway.CreateAttempts);
+            Assert.AreEqual(0, gateway.Welcome.Count);
+            await coordinator.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [TestMethod]
     public async Task DeleteFailureLeavesTheInactiveBindingForRetry()
     {
         var store = new RecordingStoreOwner(Snapshot(ownerOpenId: "owner"));

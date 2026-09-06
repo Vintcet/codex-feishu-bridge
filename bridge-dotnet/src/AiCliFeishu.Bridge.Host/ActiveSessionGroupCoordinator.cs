@@ -369,7 +369,8 @@ internal sealed class ActiveSessionGroupCoordinator :
                 cancellationToken);
             return numbered.Session ?? session;
         }
-        if ((!forceRetry && ExtensionString(session, "feishuChatError") is not null) ||
+        if (!CanCreateGroup(session, forceRetry) ||
+            (!forceRetry && ExtensionString(session, "feishuChatError") is not null) ||
             string.IsNullOrWhiteSpace(store.Bindings.OwnerOpenId))
         {
             return session;
@@ -409,6 +410,17 @@ internal sealed class ActiveSessionGroupCoordinator :
             ExtensionString(session, "feishuChatId") is { } sessionChat)
         {
             return [sessionChat];
+        }
+        if (store.Sessions.Sessions.TryGetValue(sessionId, out session) &&
+            ExtensionBoolean(session, "managedByAssistant") &&
+            ExtensionString(session, "feishuChatId") is null &&
+            ExtensionString(session, "feishuChatError") is null &&
+            !CanCreateGroup(session, forceRetry: false))
+        {
+            // An ended or long-inactive session has no notification recipient.
+            // Do not silently fall back to the owner's private chat, which would
+            // resurrect stale prompts after its session group was cleaned up.
+            return [];
         }
         return store.Bindings.OwnerOpenId is { } ownerOpenId &&
             store.Bindings.Users.TryGetValue(ownerOpenId, out var binding) &&
@@ -512,7 +524,8 @@ internal sealed class ActiveSessionGroupCoordinator :
             return session;
         }
         var ownerOpenId = store.Bindings.OwnerOpenId;
-        if (ExtensionString(session, "feishuChatId") is not null ||
+        if (!CanCreateGroup(session, forceRetry) ||
+            ExtensionString(session, "feishuChatId") is not null ||
             (!forceRetry && ExtensionString(session, "feishuChatError") is not null) ||
             string.IsNullOrWhiteSpace(ownerOpenId))
         {
@@ -854,6 +867,10 @@ internal sealed class ActiveSessionGroupCoordinator :
         DateTimeOffset.TryParse(session.OpenedAt, out var parsed)
             ? parsed
             : DateTimeOffset.MinValue;
+
+    private bool CanCreateGroup(SessionStoreRecord session, bool forceRetry) =>
+        session.Status != SessionStatuses.Ended &&
+        (forceRetry || clock.GetUtcNow() - SessionGroupActivityTime(session) < inactiveAge);
 
     private static DateTimeOffset SessionGroupActivityTime(
         SessionStoreRecord session)

@@ -23,7 +23,8 @@ internal sealed partial class ActiveFeishuApprovalNotificationCoordinator
             current.Inputs.Requests.TryGetValue(requestId, out input!) &&
             input.Status == InputRequestStatuses.Pending &&
             string.Equals(input.SessionId, sessionId, StringComparison.Ordinal) &&
-            current.Sessions.Sessions.TryGetValue(sessionId, out session!))
+            current.Sessions.Sessions.TryGetValue(sessionId, out session!) &&
+            session.Status != SessionStatuses.Ended)
         {
             return true;
         }

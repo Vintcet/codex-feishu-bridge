@@ -10,6 +10,12 @@ namespace AiCliFeishu.Bridge.Host.Tests;
 [TestClass]
 public sealed class BridgeActiveHostProcessIntegrationTests
 {
+    private static readonly TimeSpan ControlRequestTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan HealthProbeTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(30);
+
+    public TestContext TestContext { get; set; } = null!;
+
     [TestMethod]
     public async Task PublishedActiveHostStartsAndStopsWithAnIsolatedSingleOwnerLease()
     {
@@ -128,7 +134,9 @@ public sealed class BridgeActiveHostProcessIntegrationTests
             using var client = new HttpClient(handler)
             {
                 BaseAddress = new Uri($"http://127.0.0.1:{port}/"),
-                Timeout = TimeSpan.FromSeconds(2),
+                // Store commits flush to disk, which can take longer than a
+                // health probe on a shared Windows runner.
+                Timeout = ControlRequestTimeout,
             };
             using var health = await WaitForReadyAsync(
                 client,
@@ -317,6 +325,10 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                     process.Kill(entireProcessTree: true);
                     await process.WaitForExitAsync();
                 }
+                if (outputTask is not null && errorTask is not null)
+                {
+                    TestContext.WriteLine(await FailureOutputAsync(outputTask, errorTask));
+                }
                 process.Dispose();
             }
             proxyCancellation.Cancel();
@@ -339,7 +351,9 @@ public sealed class BridgeActiveHostProcessIntegrationTests
         Task<string> outputTask,
         Task<string> errorTask)
     {
-        for (var attempt = 1; attempt <= 120; attempt++)
+        // Keep the startup deadline independent of the control request timeout.
+        using var startupCancellation = new CancellationTokenSource(StartupTimeout);
+        while (!startupCancellation.IsCancellationRequested)
         {
             if (process.HasExited)
             {
@@ -349,9 +363,13 @@ public sealed class BridgeActiveHostProcessIntegrationTests
             }
             try
             {
+                await Task.Delay(100, startupCancellation.Token);
+                using var probeCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    startupCancellation.Token);
+                probeCancellation.CancelAfter(HealthProbeTimeout);
                 using var request = new HttpRequestMessage(HttpMethod.Get, "health");
                 request.Headers.Add(BridgeControlApi.ControlTokenHeader, controlToken);
-                using var response = await client.SendAsync(request);
+                using var response = await client.SendAsync(request, probeCancellation.Token);
                 if (response.IsSuccessStatusCode)
                 {
                     var document = JsonDocument.Parse(
@@ -374,7 +392,6 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                 error is HttpRequestException or TaskCanceledException)
             {
             }
-            await Task.Delay(100);
         }
 
         if (!process.HasExited)
